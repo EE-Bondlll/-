@@ -1,0 +1,38 @@
+{
+  "_comment": "统一风险记录 Schema —— 所有检测器输出、数据 API 存储的唯一标准。category 取值：vuln|weak_config|tamper|malware|leak|bad_link；severity：critical|high|medium|low；status：active|confirmed|false_positive|fixed；signature = sha256(url + category + title + 关键细节)",
+  "example": {
+    "asset_url": "https://example.com/login.php",
+    "category": "vuln",
+    "severity": "high",
+    "title": "WordPress 5.2.3 存在 XXE 漏洞 (CVE-2019-9787)",
+    "description": "命中 Nuclei 模板 xxe.yaml：请求响应出现 XXE 特征",
+    "evidence": {
+      "request_sample": "GET /wp-xxx HTTP/1.1 ...",
+      "response_sample": "HTTP/1.1 200 OK ...",
+      "screenshot_ref": "screenshots/2026-10-14/abc.png",
+      "matched_context": "命中上下文片段（敏感信息检测使用，必须脱敏）"
+    },
+    "raw_output": "检测工具原始输出（JSON 字符串）",
+    "tool": "nuclei",
+    "template": "xxe.yaml",
+    "first_seen": "2026-10-14T20:00:00+08:00",
+    "last_seen": "2026-10-14T20:00:00+08:00",
+    "status": "active",
+    "signature": "sha256(url + category + title + detail)"
+  },
+  "fields": {
+    "asset_url": "string, 必填，资产 URL",
+    "category": "string, 必填，风险类别枚举",
+    "severity": "string, 必填，风险等级枚举",
+    "title": "string, 必填，风险标题",
+    "description": "string, 可选，风险描述",
+    "evidence": "object, 可选，证据（request_sample/response_sample/screenshot_ref/matched_context）",
+    "raw_output": "string, 可选，检测工具原始输出",
+    "tool": "string, 可选，来源工具",
+    "template": "string, 可选，命中的模板或规则",
+    "first_seen": "datetime ISO8601, 首次发现时间",
+    "last_seen": "datetime ISO8601, 最近发现时间",
+    "status": "string, 风险状态枚举",
+    "signature": "string, 必填，去重与复测唯一键"
+  }
+}

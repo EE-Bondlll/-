@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# 环境与密钥
+.env
+*.local
+
+# 运行产物
+*.log
+reports/
+screenshots/
+testbed/data/
