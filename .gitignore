@@ -13,3 +13,4 @@ venv/
 reports/
 screenshots/
 testbed/data/
+agent-core/data/
