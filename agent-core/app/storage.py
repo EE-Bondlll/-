@@ -12,6 +12,7 @@ import threading
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 CONFIGS_FILE = os.path.join(DATA_DIR, "configs.json")
 JOBS_FILE = os.path.join(DATA_DIR, "jobs.json")
+AUDIT_FILE = os.path.join(DATA_DIR, "audit_logs.json")
 
 
 def _ensure_dir(path: str):

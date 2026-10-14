@@ -1,30 +1,42 @@
-"""Agent Core - 智能巡检编排服务（v0.3）
+"""Agent Core - 智能巡检编排服务（v0.4）
 
-已实现（任务书 4.1 / 4.2）：
-- 配置管理：POST/GET /api/config（JSON 文件持久化 + 校验，PG 后端预留）
-- 敏感信息定义管理：/api/rules（关键词/正则/文件类型 CRUD）+ 样例文件上传
-- 巡检计划：POST /api/plan（规则版 / LLM 版，LLM 失败自动降级）
-- 指纹 → 检测策略路由：POST /api/strategy
-- LLM 状态：GET /api/llm/status
-- 任务入口：POST /api/jobs/start、GET /api/jobs（4.3 编排的前置）
+已实现：
+- 4.1 配置管理 / 敏感规则管理 / 样例上传 / 校验
+- 4.2 巡检计划（LLM 优先 + 规则兜底）/ 指纹策略路由 / 调用容错
+- 4.3 编排执行：手动巡检（后台线程执行，pending→running→done/failed）、
+  定时巡检（APScheduler cron 到点自动执行）、白名单校验、QPS 限速、审计日志
 
 运行：uvicorn app.main:app --reload --port 8000
 """
 import re
+import threading
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 
-from . import planner, rules, storage
+from . import clients, orchestrator, planner, rules, scheduler, storage
 
-app = FastAPI(title="Agent Core - 智能巡检编排服务", version="0.3.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    scheduler.start_scheduler()
+    yield
+    scheduler.shutdown()
+
+
+app = FastAPI(title="Agent Core - 智能巡检编排服务", version="0.4.0", lifespan=lifespan)
 
 # 存储后端（当前 JSON 文件；PG 就绪后换成 PGStore 实现同接口即可）
 config_store = storage.FileStore(storage.CONFIGS_FILE)
 job_store = storage.FileStore(storage.JOBS_FILE)
+audit_store = storage.FileStore(storage.AUDIT_FILE)
 rule_store = rules.RuleStore()
+
+# 编排执行器（当前 MOCK_MODE=1：调用 mock 检测器；B/C 就绪后设 MOCK_MODE=0 切换真实服务）
+orchestrator_engine = orchestrator.Orchestrator(clients.DetectorClient(), clients.DataClient())
 
 # ---------- 校验 ----------
 
@@ -32,29 +44,21 @@ _DOMAIN_RE = re.compile(r"^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0
 _VALID_SCOPES = {"full", "subdomains", "paths"}
 
 
-def validate_domains(domains: list[str]):
-    bad = [d for d in domains if not _DOMAIN_RE.match(d)]
-    if bad:
-        raise HTTPException(status_code=422, detail=f"域名格式非法: {bad}")
-
-
 def validate_config(cfg: dict):
     if not cfg.get("domains"):
         raise HTTPException(status_code=422, detail="domains 不能为空")
-    validate_domains(cfg["domains"])
+    bad = [d for d in cfg["domains"] if not _DOMAIN_RE.match(d)]
+    if bad:
+        raise HTTPException(status_code=422, detail=f"域名格式非法: {bad}")
     if cfg.get("scope") not in _VALID_SCOPES:
-        raise HTTPException(status_code=422,
-                            detail=f"scope 必须为 {sorted(_VALID_SCOPES)} 之一")
-    cron = cfg.get("cron", "")
-    # 宽松校验：5 段 cron（分 时 日 月 周）
-    if not re.match(r"^(\S+\s+){4}\S+$", cron):
-        raise HTTPException(status_code=422, detail=f"cron 表达式格式非法: {cron}")
+        raise HTTPException(status_code=422, detail=f"scope 必须为 {sorted(_VALID_SCOPES)} 之一")
+    if not re.match(r"^(\S+\s+){4}\S+$", cfg.get("cron", "")):
+        raise HTTPException(status_code=422, detail=f"cron 表达式格式非法: {cfg.get('cron')}")
 
 
 # ---------- 模型 ----------
 
 class Config(BaseModel):
-    """巡检授权配置。"""
     domains: list[str] = Field(min_length=1, description="授权域名（白名单）")
     scope: str = "full"
     cron: str = "0 2 * * *"
@@ -70,7 +74,7 @@ class JobStartRequest(BaseModel):
 
 
 class RuleIn(BaseModel):
-    rule_type: str = Field(description="keyword | regex | file_type | sample")
+    rule_type: str
     name: str
     pattern: str = ""
     severity: str = "medium"
@@ -81,6 +85,71 @@ class RulePatch(BaseModel):
     pattern: str | None = None
     severity: str | None = None
     enabled: bool | None = None
+
+
+# ---------- 审计 ----------
+
+def _audit(action: str, target: str, detail: dict):
+    entry = {
+        "operator": "system",
+        "action": action,
+        "target": target,
+        "detail": detail,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    audit_store.save(uuid.uuid4().hex[:12], entry)
+
+
+# ---------- 任务执行 ----------
+
+def _run_job(job_id: str, config_id: str, plan: dict):
+    """后台执行一次巡检：pending → running → done/failed。"""
+    job = job_store.get(job_id)
+    job["status"] = "running"
+    job_store.save(job_id, job)
+    _audit("scan_start", config_id, {"plan_id": plan["plan_id"], "job_id": job_id})
+    try:
+        result = orchestrator_engine.run(plan, config_id)
+        job = job_store.get(job_id)
+        job["status"] = "done"
+        job["finished_at"] = datetime.now(timezone.utc).isoformat()
+        job["result"] = result
+        job_store.save(job_id, job)
+        _audit("scan_done", config_id,
+               {"job_id": job_id, "risks": result.get("risks_after_dedup"),
+                "high_count": result.get("high_count")})
+    except Exception as e:
+        job = job_store.get(job_id)
+        job["status"] = "failed"
+        job["finished_at"] = datetime.now(timezone.utc).isoformat()
+        job["error"] = str(e)[:500]
+        job_store.save(job_id, job)
+        _audit("scan_failed", config_id, {"job_id": job_id, "error": str(e)[:200]})
+
+
+def _spawn_job(job_type: str, config_id: str, plan: dict) -> dict:
+    job = {
+        "job_id": uuid.uuid4().hex[:12],
+        "job_type": job_type,                # manual | scheduled | retest
+        "config_id": config_id,
+        "plan_id": plan["plan_id"],
+        "status": "pending",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "plan": plan,
+    }
+    job_store.save(job["job_id"], job)
+    threading.Thread(target=_run_job, args=(job["job_id"], config_id, plan), daemon=True).start()
+    return job
+
+
+def _scheduled_run(config_id: str):
+    """定时巡检回调：读配置 → 生成计划 → 后台执行（与手动同一链路）。"""
+    cfg = config_store.get(config_id)
+    if cfg is None:
+        return
+    plan = planner.create_planner().build_plan(cfg)
+    _spawn_job("scheduled", config_id, plan)
 
 
 # ---------- 健康检查 ----------
@@ -94,11 +163,13 @@ def health():
 
 @app.post("/api/config")
 def save_config(cfg: Config):
-    """录入巡检授权配置（幂等：同域名集合覆盖保存）。"""
+    """录入巡检授权配置（幂等），并按 cron 注册/更新定时巡检。"""
     data = cfg.model_dump()
     validate_config(data)
     config_id = storage.make_config_id(data["domains"])
     config_store.save(config_id, data)
+    scheduler.schedule_inspection(config_id, data["cron"], _scheduled_run)
+    _audit("config_change", config_id, {"domains": data["domains"], "cron": data["cron"]})
     return {"config_id": config_id, "saved": True, "domains": data["domains"]}
 
 
@@ -146,7 +217,6 @@ def delete_rule(rule_id: str):
 
 @app.post("/api/rules/sample")
 async def upload_sample(file: UploadFile = File(...)):
-    """上传敏感信息样例文件（如 .env 样例），存本地并返回指纹供比对。"""
     if file.filename is None or file.filename == "":
         raise HTTPException(status_code=422, detail="文件名不能为空")
     meta = rules.save_sample(await file.read(), file.filename)
@@ -157,7 +227,6 @@ async def upload_sample(file: UploadFile = File(...)):
 
 @app.post("/api/plan")
 def make_plan(req: PlanRequest):
-    """读取配置 → 生成巡检计划（LLM 版优先，失败/未配置时规则版）。"""
     cfg = config_store.get(req.config_id)
     if cfg is None:
         raise HTTPException(status_code=404, detail="config not found")
@@ -166,7 +235,6 @@ def make_plan(req: PlanRequest):
 
 @app.post("/api/strategy")
 def strategy_for(fp: dict):
-    """指纹 → 检测策略路由（供自测与演示）。"""
     return {"fingerprint": fp, "steps": planner.route_strategy(fp)}
 
 
@@ -182,26 +250,16 @@ def llm_status():
     }
 
 
-# ---------- 任务入口（4.3 前置） ----------
+# ---------- 4.3 任务入口与调度 ----------
 
 @app.post("/api/jobs/start")
 def start_job(req: JobStartRequest):
-    """发起一次巡检：生成计划、记录任务、返回 job_id（执行由 4.3 编排器接管）。"""
+    """手动发起一次巡检：生成计划 → 后台执行 → 立即返回 job_id。"""
     cfg = config_store.get(req.config_id)
     if cfg is None:
         raise HTTPException(status_code=404, detail="config not found")
     plan = planner.create_planner().build_plan(cfg)
-    job = {
-        "job_id": uuid.uuid4().hex[:12],
-        "job_type": "manual",
-        "config_id": req.config_id,
-        "plan_id": plan["plan_id"],
-        "status": "pending",               # pending → running → done/failed
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "finished_at": None,
-        "plan": plan,
-    }
-    job_store.save(job["job_id"], job)
+    job = _spawn_job("manual", req.config_id, plan)
     return {"job_id": job["job_id"], "status": job["status"], "plan": plan}
 
 
@@ -216,3 +274,16 @@ def get_job(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return job
+
+
+@app.get("/api/scheduler/jobs")
+def scheduler_jobs():
+    """查看已注册的定时巡检任务。"""
+    return {"scheduled": scheduler.list_scheduled_jobs()}
+
+
+@app.get("/api/audit")
+def list_audit(limit: int = 50):
+    entries = audit_store.list_all()
+    entries.sort(key=lambda e: e.get("created_at", ""), reverse=True)
+    return {"audit": entries[:limit]}
