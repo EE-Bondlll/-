@@ -4,6 +4,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: inspection-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: inspection
       POSTGRES_PASSWORD: inspection_dev
@@ -22,6 +23,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: inspection-redis
+    restart: unless-stopped
     ports:
       - "6379:6379"
     healthcheck:
@@ -35,6 +37,7 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.agent-core
     container_name: inspection-agent-core
+    restart: unless-stopped
     environment:
       MOCK_MODE: ${MOCK_MODE:-1}
       DETECTOR_BASE_URL: http://detectors:8001

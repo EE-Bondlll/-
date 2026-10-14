@@ -17,6 +17,13 @@ def start_scheduler():
         logger.info("scheduler started")
 
 
+def shutdown():
+    """停止调度器（幂等）。lifespan 退出时调用。"""
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+        logger.info("scheduler stopped")
+
+
 def schedule_inspection(config_id: str, cron_expr: str, run_callback):
     """注册定时巡检。cron_expr 为空/禁用则跳过。已注册的同 config 任务先移除再注册（幂等）。"""
     if not cron_expr or cron_expr.lower() in ("", "disabled", "none"):
