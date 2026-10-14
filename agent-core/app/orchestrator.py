@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 
 from . import clients
+from . import reviewer as reviewer_mod
 
 # 简单 QPS 限速（令牌桶）：全局 + 每资产
 class RateLimiter:
@@ -41,9 +42,11 @@ def check_whitelist(assets: list[dict], domains: list[str]) -> list[dict]:
 
 
 class Orchestrator:
-    def __init__(self, detector: clients.DetectorClient, data: clients.DataClient):
+    def __init__(self, detector: clients.DetectorClient, data: clients.DataClient,
+                 reviewer=None):
         self.detector = detector
         self.data = data
+        self.reviewer = reviewer or reviewer_mod.create_reviewer()
         self.limiter = RateLimiter(qps=5)
 
     def run(self, plan: dict, config_id: str) -> dict:
@@ -69,17 +72,22 @@ class Orchestrator:
                 self._sensitive_scan(step["endpoint"], assets, cfg)
             all_risks.extend(resp.get("risks", []))
 
-        # 阶段6：去重（signature 唯一）+ 定级
+        # 阶段6：去重（signature 唯一）
         dedup = self._dedup(all_risks)
+
+        # 阶段7（4.5）：AI 误报研判 + 三段式解释，写回 status / ai_explanation
+        dedup = self.reviewer.review(dedup)
         self.data.write_risks(dedup)
 
-        # 阶段7-8：基线对比 + 告警（统计高危）
+        # 阶段8-9：基线对比 + 告警（只统计研判确认为真实风险的高危）
         baseline = self.data.baseline_diff(scope=",".join(domains))
-        high_count = sum(1 for r in dedup if r["severity"] in ("critical", "high"))
+        high_count = sum(1 for r in dedup
+                         if r["status"] == "confirmed"
+                         and r["severity"] in ("critical", "high"))
         if high_count > 0:
             self.data.send_alert(
                 "high" if high_count >= 3 else "medium",
-                f"巡检完成：发现 {high_count} 个高危风险（mock 环境）",
+                f"巡检完成：确认 {high_count} 个高危风险（mock 环境）",
                 {"plan_id": plan["plan_id"], "config_id": config_id},
             )
 
@@ -90,7 +98,8 @@ class Orchestrator:
             "assets_found": len(assets),
             "risks_raw": len(all_risks),
             "risks_after_dedup": len(dedup),
-            "high_count": high_count,
+            "review_mode": getattr(self.reviewer, "mode", "rule"),
+            "confirmed_high": high_count,
             "baseline": baseline,
             "risks": dedup,
         }

@@ -246,8 +246,17 @@ def llm_status():
         "llm_configured": p.available(),
         "base_url": p.base_url,
         "model": p.model,
-        "note": "设置环境变量 LLM_API_KEY 后启用 LLM 规划（恒脑/DeepSeek OpenAI 兼容接口）",
+        "note": "设置环境变量 LLM_API_KEY 后启用 LLM 规划与研判（恒脑/DeepSeek OpenAI 兼容接口）",
     }
+
+
+# ---------- 4.5 AI 误报研判 ----------
+
+@app.post("/api/review")
+def review_risks(risks: list[dict]):
+    """对风险列表做误报研判：返回带 status / ai_explanation 的更新结果（供演示与自测）。"""
+    return {"mode": orchestrator_engine.reviewer.mode,
+            "reviewed": orchestrator_engine.reviewer.review(risks)}
 
 
 # ---------- 4.3 任务入口与调度 ----------
