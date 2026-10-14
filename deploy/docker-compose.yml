@@ -1,0 +1,80 @@
+# 网站安全智能巡检智能体 - 一键部署（交付形态）
+# 用法：docker compose -f deploy/docker-compose.yml up -d --build
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: inspection-postgres
+    environment:
+      POSTGRES_USER: inspection
+      POSTGRES_PASSWORD: inspection_dev
+      POSTGRES_DB: inspection
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../contracts/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inspection -d inspection"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: inspection-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  agent-core:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent-core
+    container_name: inspection-agent-core
+    environment:
+      MOCK_MODE: ${MOCK_MODE:-1}
+      DETECTOR_BASE_URL: http://detectors:8001
+      DATA_BASE_URL: http://sensitive-report:8002
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - agentdata:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # 成员B：检测执行层（待完成，完成后填充 build 与端口）
+  detectors:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.detectors
+    container_name: inspection-detectors
+    ports:
+      - "8001:8001"
+    depends_on:
+      - postgres
+
+  # 成员C：敏感信息与数据报告（待完成）
+  sensitive-report:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.sensitive-report
+    container_name: inspection-sensitive-report
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  agentdata:
