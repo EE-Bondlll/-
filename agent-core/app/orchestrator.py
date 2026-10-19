@@ -50,16 +50,27 @@ class Orchestrator:
         self.limiter = RateLimiter(qps=5)
 
     def run(self, plan: dict, config_id: str) -> dict:
-        """执行计划，返回聚合后的巡检结果。"""
+        """执行计划，返回聚合后的巡检结果。
+
+        plan 可携带 targets（受影响资产列表）→ 复测模式：跳过全站发现，
+        仅对指定资产执行检测；否则为全量模式：先做资产发现。
+        """
         domains = plan.get("domains", [])
         cfg = {"rate_limit_qps": 5, "non_destructive": True, "timeout_sec": 30}
         all_risks: list[dict] = []
         assets: list[dict] = []
 
-        # 阶段1：资产发现（discovery）
-        disc = self.detector.scan("/scan/discovery",
-                                  [{"url": d} for d in domains], cfg)
-        assets = check_whitelist(disc.get("assets", []), domains)
+        targets = plan.get("targets")
+        if targets:
+            # 复测模式（4.6）：只重扫受影响资产，不再爬全站
+            assets = targets
+            scan_mode = "retest"
+        else:
+            # 阶段1：资产发现（discovery）
+            disc = self.detector.scan("/scan/discovery",
+                                      [{"url": d} for d in domains], cfg)
+            assets = check_whitelist(disc.get("assets", []), domains)
+            scan_mode = "full"
         self.data.write_assets(assets)
 
         # 阶段2-5：并行检测（vuln / tamper / malware / sensitive）
@@ -94,6 +105,7 @@ class Orchestrator:
         return {
             "config_id": config_id,
             "plan_id": plan["plan_id"],
+            "scan_mode": scan_mode,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "assets_found": len(assets),
             "risks_raw": len(all_risks),

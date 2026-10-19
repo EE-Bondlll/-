@@ -1,10 +1,13 @@
-"""Agent Core - 智能巡检编排服务（v0.4）
+"""Agent Core - 智能巡检编排服务（v0.5）
 
 已实现：
 - 4.1 配置管理 / 敏感规则管理 / 样例上传 / 校验
 - 4.2 巡检计划（LLM 优先 + 规则兜底）/ 指纹策略路由 / 调用容错
 - 4.3 编排执行：手动巡检（后台线程执行，pending→running→done/failed）、
   定时巡检（APScheduler cron 到点自动执行）、白名单校验、QPS 限速、审计日志
+- 4.5 AI 误报研判：规则版 + LLM 版（失败降级）+ 三段式解释
+- 4.6 闭环功能：基线对比（新增/已修复/持续）、复测队列（受影响资产重扫、
+  未命中自动消警置 fixed）、告警触发（级别阈值 + 24h 去重 + 事件留痕）
 
 运行：uvicorn app.main:app --reload --port 8000
 """
@@ -17,7 +20,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 
-from . import clients, orchestrator, planner, rules, scheduler, storage
+from . import clients, ledger as ledger_mod, orchestrator, planner, rules, scheduler, storage
 
 
 @asynccontextmanager
@@ -27,7 +30,7 @@ async def lifespan(_app: FastAPI):
     scheduler.shutdown()
 
 
-app = FastAPI(title="Agent Core - 智能巡检编排服务", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Agent Core - 智能巡检编排服务", version="0.5.0", lifespan=lifespan)
 
 # 存储后端（当前 JSON 文件；PG 就绪后换成 PGStore 实现同接口即可）
 config_store = storage.FileStore(storage.CONFIGS_FILE)
@@ -37,6 +40,9 @@ rule_store = rules.RuleStore()
 
 # 编排执行器（当前 MOCK_MODE=1：调用 mock 检测器；B/C 就绪后设 MOCK_MODE=0 切换真实服务）
 orchestrator_engine = orchestrator.Orchestrator(clients.DetectorClient(), clients.DataClient())
+
+# 风险账本（4.6）：基线对比 / 复测队列 / 告警事件
+ledger_engine = ledger_mod.Ledger()
 
 # ---------- 校验 ----------
 
@@ -73,6 +79,10 @@ class JobStartRequest(BaseModel):
     config_id: str
 
 
+class RetestRequest(BaseModel):
+    config_id: str
+
+
 class RuleIn(BaseModel):
     rule_type: str
     name: str
@@ -103,13 +113,37 @@ def _audit(action: str, target: str, detail: dict):
 # ---------- 任务执行 ----------
 
 def _run_job(job_id: str, config_id: str, plan: dict):
-    """后台执行一次巡检：pending → running → done/failed。"""
+    """后台执行一次巡检：pending → running → done/failed；完成后入账（4.6）。"""
     job = job_store.get(job_id)
     job["status"] = "running"
     job_store.save(job_id, job)
     _audit("scan_start", config_id, {"plan_id": plan["plan_id"], "job_id": job_id})
     try:
         result = orchestrator_engine.run(plan, config_id)
+        # 4.6 闭环入账：按任务类型走基线对比或复测消警
+        job_type = job.get("job_type", "manual")
+        risks = result.get("risks", [])
+        if job_type == "retest":
+            retest = ledger_engine.apply_retest(
+                config_id, plan.get("targets", []), risks, job_id)
+            result["retest"] = retest
+            _audit("retest_done", config_id,
+                   {"job_id": job_id, "cleared": len(retest["cleared"]),
+                    "still_active": len(retest["still_active"]),
+                    "newly_found": len(retest["newly_found"])})
+        else:
+            baseline = ledger_engine.apply_full(config_id, risks, job_id)
+            result["baseline"] = baseline
+            alerts = ledger_engine.evaluate_alerts(config_id, risks)
+            if alerts:
+                result["alerts"] = alerts
+                _audit("alert_triggered", config_id,
+                       {"job_id": job_id, "count": len(alerts),
+                        "levels": sorted({a["level"] for a in alerts})})
+            _audit("baseline_done", config_id,
+                   {"job_id": job_id, "new": len(baseline["new"]),
+                    "fixed": len(baseline["fixed"]),
+                    "persistent": len(baseline["persistent"])})
         job = job_store.get(job_id)
         job["status"] = "done"
         job["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -257,6 +291,49 @@ def review_risks(risks: list[dict]):
     """对风险列表做误报研判：返回带 status / ai_explanation 的更新结果（供演示与自测）。"""
     return {"mode": orchestrator_engine.reviewer.mode,
             "reviewed": orchestrator_engine.reviewer.review(risks)}
+
+
+# ---------- 4.6 闭环功能：基线对比 / 复测队列 / 告警 ----------
+
+@app.get("/api/baseline")
+def get_baseline(config_id: str):
+    """最近一次全量巡检的基线对比结果：新增 / 已修复 / 持续风险。"""
+    diff = ledger_engine.last_baseline(config_id)
+    if diff is None:
+        raise HTTPException(status_code=404,
+                            detail="尚无基线数据：请先对该 config 执行一次全量巡检")
+    return diff
+
+
+@app.get("/api/retest/targets")
+def retest_targets(config_id: str):
+    """复测队列的受影响资产：当前 status=active 风险所属资产（去重）。"""
+    targets = ledger_engine.retest_targets(config_id)
+    return {"config_id": config_id, "targets": targets, "count": len(targets)}
+
+
+@app.post("/api/retest")
+def start_retest(req: RetestRequest):
+    """发起复测：仅重扫受影响资产；未再命中的风险自动消警（置 fixed）。"""
+    cfg = config_store.get(req.config_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="config not found")
+    targets = ledger_engine.retest_targets(req.config_id)
+    if not targets:
+        return {"job": None,
+                "note": "无待复测风险（该 config 下账本无 active 风险）",
+                "targets": []}
+    plan = planner.create_planner().build_plan(cfg)
+    plan["targets"] = targets
+    plan["note"] = f"复测队列：{len(targets)} 个受影响资产"
+    job = _spawn_job("retest", req.config_id, plan)
+    return {"job": job, "targets": targets, "count": len(targets)}
+
+
+@app.get("/api/alerts")
+def list_alerts(limit: int = 50):
+    """告警事件记录（含触发规则、级别、去重窗口）。"""
+    return {"alerts": ledger_engine.list_alerts(limit)}
 
 
 # ---------- 4.3 任务入口与调度 ----------

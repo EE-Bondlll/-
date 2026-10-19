@@ -33,7 +33,7 @@ wsl -d Ubuntu -u root -- docker compose version
 **现象**：WSL 发行版在最后一次 wsl 命令结束后约 8 秒自动关闭，dockerd 随之停止、容器优雅退出。
 
 **已采取的修复（双保险）**：
-1. **常驻进程**：Windows 计划任务 `WSLInspectionKeepAlive`（登录时运行）→ `C:\Users\32024\keep-wsl-alive.bat` → `wsl.exe -d Ubuntu -u root --exec sleep 3600`，保持发行版常驻。验证：90 秒无操作后发行版仍 Running、容器不重启。
+1. **常驻进程**：Windows 计划任务 `WSLInspectionKeepAlive`（登录时运行）→ `C:\Users\32024\keep-wsl-alive.bat` → 循环执行 `wsl.exe -d Ubuntu -u root --exec sleep 86400`（每轮保持 24 小时，wsl 退出后 5 秒自动重启，进程永不结束），保持发行版常驻。
 2. **容器自愈**：docker-compose.yml 全部服务 `restart: unless-stopped`——即使发行版意外关闭后重新拉起，容器自动恢复。
 
 **日常使用**：正常开机即可（计划任务登录自动保持）。若手动 `wsl --shutdown` 后，执行一次任意 wsl 命令即恢复全部服务。
