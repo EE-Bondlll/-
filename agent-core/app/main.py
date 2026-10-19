@@ -76,7 +76,7 @@ class PlanRequest(BaseModel):
 
 
 class JobStartRequest(BaseModel):
-    config_id: str
+    config_id: str = ""  # 兼容 query 参数：body 可缺省，由 start_job 兜底取 query
 
 
 class RetestRequest(BaseModel):
@@ -339,13 +339,19 @@ def list_alerts(limit: int = 50):
 # ---------- 4.3 任务入口与调度 ----------
 
 @app.post("/api/jobs/start")
-def start_job(req: JobStartRequest):
-    """手动发起一次巡检：生成计划 → 后台执行 → 立即返回 job_id。"""
-    cfg = config_store.get(req.config_id)
+def start_job(req: JobStartRequest | None = None, config_id: str | None = None):
+    """手动发起一次巡检：生成计划 → 后台执行 → 立即返回 job_id。
+
+    兼容两种参数传递：JSON body {"config_id": "..."}（标准）或 URL query ?config_id=...（恒脑平台 API 工具采用的方式）。
+    """
+    cid = (req.config_id if req else "") or config_id or ""
+    if not cid:
+        raise HTTPException(status_code=422, detail="config_id 必填（body 或 query）")
+    cfg = config_store.get(cid)
     if cfg is None:
         raise HTTPException(status_code=404, detail="config not found")
     plan = planner.create_planner().build_plan(cfg)
-    job = _spawn_job("manual", req.config_id, plan)
+    job = _spawn_job("manual", cid, plan)
     return {"job_id": job["job_id"], "status": job["status"], "plan": plan}
 
 
