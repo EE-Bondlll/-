@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 COPY agent-core/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt -i https://mirrors.huaweicloud.com/pypi/simple --trusted-host mirrors.huaweicloud.com
 
 COPY agent-core/app /app/app
 
