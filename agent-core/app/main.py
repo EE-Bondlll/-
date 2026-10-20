@@ -47,15 +47,16 @@ ledger_engine = ledger_mod.Ledger()
 # ---------- 校验 ----------
 
 _DOMAIN_RE = re.compile(r"^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+_IPV4_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
 _VALID_SCOPES = {"full", "subdomains", "paths"}
 
 
 def validate_config(cfg: dict):
     if not cfg.get("domains"):
         raise HTTPException(status_code=422, detail="domains 不能为空")
-    bad = [d for d in cfg["domains"] if not _DOMAIN_RE.match(d)]
+    bad = [d for d in cfg["domains"] if not (_DOMAIN_RE.match(d) or _IPV4_RE.match(d))]
     if bad:
-        raise HTTPException(status_code=422, detail=f"域名格式非法: {bad}")
+        raise HTTPException(status_code=422, detail=f"域名/IP 格式非法: {bad}")
     if cfg.get("scope") not in _VALID_SCOPES:
         raise HTTPException(status_code=422, detail=f"scope 必须为 {sorted(_VALID_SCOPES)} 之一")
     if not re.match(r"^(\S+\s+){4}\S+$", cfg.get("cron", "")):
