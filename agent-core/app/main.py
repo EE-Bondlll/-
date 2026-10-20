@@ -11,13 +11,14 @@
 
 运行：uvicorn app.main:app --reload --port 8000
 """
+import os
 import re
 import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header
 from pydantic import BaseModel, Field
 
 from . import clients, ledger as ledger_mod, orchestrator, planner, rules, scheduler, storage
@@ -195,6 +196,35 @@ def health():
 
 
 # ---------- 4.1 配置管理 ----------
+
+# 管理员口令：部署时通过环境变量 ADMIN_TOKEN 注入；未设置时为演示默认值
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "SecInspector@2026")
+
+
+class AuthorizeRequest(BaseModel):
+    domains: list[str] = Field(min_length=1, description="待授权域名/IP 列表")
+    scope: str = "full"
+    cron: str = "0 2 * * *"
+    sensitive_rules: list[str] = []
+    admin_token: str = ""  # 兼容请求头与 body 两种认证方式
+
+
+@app.post("/api/authorize")
+def authorize_config(req: AuthorizeRequest, x_admin_token: str = Header(default="")):
+    """恒脑工具：管理员认证后新增授权站点（身份校验 + 幂等 + 审计留痕）。"""
+    token = (req.admin_token or x_admin_token or "").strip()
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="管理员口令错误")
+    data = {"domains": req.domains, "scope": req.scope,
+            "cron": req.cron, "sensitive_rules": req.sensitive_rules}
+    validate_config(data)
+    config_id = storage.make_config_id(data["domains"])
+    config_store.save(config_id, data)
+    scheduler.schedule_inspection(config_id, data["cron"], _scheduled_run)
+    _audit("config_authorized", config_id,
+           {"domains": data["domains"], "scope": data["scope"], "by": "admin_api"})
+    return {"config_id": config_id, "saved": True, "domains": data["domains"]}
+
 
 @app.post("/api/config")
 def save_config(cfg: Config):
