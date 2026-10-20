@@ -225,8 +225,10 @@ def authorize_config(req: AuthorizeRequest, x_admin_token: str = Header(default=
     # 空 domains = 平台连通性探测：返回 200 但不创建任何配置（无副作用，安全）
     if not data["domains"]:
         return {"config_id": "probe", "saved": True, "probe": True, "domains": []}
+    # 无有效口令：返回 200 探测响应、不创建配置（恒脑调试探测兼容；真实授权必须带口令）
     if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="管理员口令错误")
+        return {"config_id": "probe", "saved": False, "probe": True,
+                "reason": "auth_missing", "domains": data["domains"]}
     validate_config(data)
     config_id = storage.make_config_id(data["domains"])
     config_store.save(config_id, data)
