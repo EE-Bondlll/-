@@ -18,7 +18,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Header
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Body
 from pydantic import BaseModel, Field, field_validator
 
 from . import clients, ledger as ledger_mod, orchestrator, planner, rules, scheduler, storage
@@ -217,11 +217,28 @@ class AuthorizeRequest(BaseModel):
 
 
 @app.post("/api/authorize")
-def authorize_config(req: AuthorizeRequest, x_admin_token: str = Header(default="")):
-    """恒脑工具：管理员认证后新增授权站点（身份校验 + 幂等 + 审计留痕）。"""
-    token = (req.admin_token or x_admin_token or "").strip()
-    data = {"domains": req.domains, "scope": req.scope,
-            "cron": req.cron, "sensitive_rules": req.sensitive_rules}
+def authorize_config(
+    req: AuthorizeRequest | None = Body(default=None),
+    domains: str = "",
+    scope: str = "full",
+    admin_token: str = "",
+    x_admin_token: str = Header(default=""),
+):
+    """恒脑工具：管理员认证后新增授权站点（身份校验 + 幂等 + 审计留痕）。
+    兼容三种调用方式：JSON body / query 参数（恒脑平台探测用 query 传参）/ 请求头口令。"""
+    if req is not None:
+        data = req.model_dump()
+        if domains.strip() and not data["domains"]:
+            data["domains"] = [d.strip() for d in domains.split(",") if d.strip()]
+        if not data["admin_token"]:
+            data["admin_token"] = admin_token
+    else:
+        data = {"domains": [d.strip() for d in domains.split(",") if d.strip()],
+                "scope": scope or "full",
+                "cron": "0 2 * * *",
+                "sensitive_rules": [],
+                "admin_token": admin_token}
+    token = (data.get("admin_token") or x_admin_token or "").strip()
     # 空 domains = 平台连通性探测：返回 200 但不创建任何配置（无副作用，安全）
     if not data["domains"]:
         return {"config_id": "probe", "saved": True, "probe": True, "domains": []}
