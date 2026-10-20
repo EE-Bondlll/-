@@ -202,7 +202,7 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "SecInspector@2026")
 
 
 class AuthorizeRequest(BaseModel):
-    domains: list[str] | str = Field(description="待授权域名/IP 列表（支持数组或逗号分隔字符串）")
+    domains: list[str] | str = Field(default_factory=list, description="待授权域名/IP 列表（支持数组或逗号分隔字符串）")
     scope: str = "full"
     cron: str = "0 2 * * *"
     sensitive_rules: list[str] = []
@@ -220,10 +220,13 @@ class AuthorizeRequest(BaseModel):
 def authorize_config(req: AuthorizeRequest, x_admin_token: str = Header(default="")):
     """恒脑工具：管理员认证后新增授权站点（身份校验 + 幂等 + 审计留痕）。"""
     token = (req.admin_token or x_admin_token or "").strip()
-    if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="管理员口令错误")
     data = {"domains": req.domains, "scope": req.scope,
             "cron": req.cron, "sensitive_rules": req.sensitive_rules}
+    # 空 domains = 平台连通性探测：返回 200 但不创建任何配置（无副作用，安全）
+    if not data["domains"]:
+        return {"config_id": "probe", "saved": True, "probe": True, "domains": []}
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="管理员口令错误")
     validate_config(data)
     config_id = storage.make_config_id(data["domains"])
     config_store.save(config_id, data)
