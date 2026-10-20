@@ -356,7 +356,13 @@ def start_job(req: JobStartRequest | None = None, config_id: str | None = None):
 
 
 @app.get("/api/jobs")
-def list_jobs():
+def list_jobs(job_id: str | None = None):
+    """任务列表；兼容恒脑平台 query 传参：GET /api/jobs?job_id=xxx 时返回单个任务详情。"""
+    if job_id:
+        job = job_store.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+        return job
     return {"jobs": job_store.list_all()}
 
 
