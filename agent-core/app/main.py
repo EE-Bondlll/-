@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Header
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import clients, ledger as ledger_mod, orchestrator, planner, rules, scheduler, storage
 
@@ -202,11 +202,18 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "SecInspector@2026")
 
 
 class AuthorizeRequest(BaseModel):
-    domains: list[str] = Field(min_length=1, description="待授权域名/IP 列表")
+    domains: list[str] | str = Field(description="待授权域名/IP 列表（支持数组或逗号分隔字符串）")
     scope: str = "full"
     cron: str = "0 2 * * *"
     sensitive_rules: list[str] = []
     admin_token: str = ""  # 兼容请求头与 body 两种认证方式
+
+    @field_validator("domains", mode="before")
+    @classmethod
+    def split_domains(cls, v):
+        if isinstance(v, str):
+            return [d.strip() for d in v.replace("，", ",").split(",") if d.strip()]
+        return v
 
 
 @app.post("/api/authorize")
