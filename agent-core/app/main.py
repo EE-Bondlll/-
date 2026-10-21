@@ -112,6 +112,30 @@ def _audit(action: str, target: str, detail: dict):
     audit_store.save(uuid.uuid4().hex[:12], entry)
 
 
+# ---------- 工具凭证与格式化（防模型编造） ----------
+
+def _new_trace() -> str:
+    """本次调用唯一凭证：模型回答末尾必须原样引用，用于事后校验是否真实调用。"""
+    return uuid.uuid4().hex[:12]
+
+
+def _format_job_report(job: dict) -> str:
+    """将巡检任务结果格式化为可直接展示的文本（模型只允许引用，不得改写）。"""
+    status = job.get("status", "unknown")
+    result = job.get("result") or {}
+    risks = result.get("risks") or []
+    high = sum(1 for r in risks if r.get("severity") == "high")
+    medium = sum(1 for r in risks if r.get("severity") == "medium")
+    low = sum(1 for r in risks if r.get("severity") == "low")
+    lines = [
+        f"巡检任务 {job.get('job_id')} 状态：{status}",
+        f"共发现 {len(risks)} 项风险（高危 {high}、中危 {medium}、低危 {low}）",
+    ]
+    for i, r in enumerate(risks, 1):
+        lines.append(f"{i}. [{r.get('severity')}] {r.get('title')} —— {r.get('asset_url')}")
+    return "\n".join(lines)
+
+
 # ---------- 任务执行 ----------
 
 def _run_job(job_id: str, config_id: str, plan: dict):
@@ -241,18 +265,21 @@ def authorize_config(
     token = (data.get("admin_token") or x_admin_token or "").strip()
     # 空 domains = 平台连通性探测：返回 200 但不创建任何配置（无副作用，安全）
     if not data["domains"]:
-        return {"config_id": "probe", "saved": True, "probe": True, "domains": []}
+        return {"ok": True, "config_id": "probe", "saved": True, "probe": True,
+                "domains": [], "trace": _new_trace()}
     # 无有效口令：返回 200 探测响应、不创建配置（恒脑调试探测兼容；真实授权必须带口令）
     if token != ADMIN_TOKEN:
-        return {"config_id": "probe", "saved": False, "probe": True,
-                "reason": "auth_missing", "domains": data["domains"]}
+        return {"ok": False, "config_id": "probe", "saved": False, "probe": True,
+                "reason": "auth_missing", "domains": data["domains"], "trace": _new_trace()}
     validate_config(data)
     config_id = storage.make_config_id(data["domains"])
     config_store.save(config_id, data)
     scheduler.schedule_inspection(config_id, data["cron"], _scheduled_run)
     _audit("config_authorized", config_id,
            {"domains": data["domains"], "scope": data["scope"], "by": "admin_api"})
-    return {"config_id": config_id, "saved": True, "domains": data["domains"]}
+    return {"ok": True, "config_id": config_id, "saved": True,
+            "authorized_domains": ",".join(data["domains"]),
+            "domains": data["domains"], "trace": _new_trace()}
 
 
 @app.post("/api/config")
@@ -355,14 +382,44 @@ def review_risks(risks: list[dict]):
 
 # ---------- 4.6 闭环功能：基线对比 / 复测队列 / 告警 ----------
 
+def _format_baseline(diff: dict) -> str:
+    """将基线对比结果格式化为可直接展示的文本（避免模型混淆 new/fixed/persistent）。"""
+    new_items = diff.get("new", []) or []
+    fixed_items = diff.get("fixed", []) or []
+    persistent_items = diff.get("persistent", []) or []
+    lines = [
+        f"基线对比报告（scan_mode={diff.get('scan_mode')}，job_id={diff.get('job_id')}）",
+        f"新增风险：{len(new_items)} 项",
+        f"已修复风险：{len(fixed_items)} 项",
+        f"持续风险：{len(persistent_items)} 项",
+    ]
+    for label, items in (("新增", new_items),
+                         ("已修复", fixed_items),
+                         ("持续", persistent_items)):
+        if items:
+            lines.append(f"\n【{label}风险清单】")
+            for i, r in enumerate(items, 1):
+                lines.append(
+                    f"{i}. [{r.get('severity')}] {r.get('title')} —— {r.get('asset_url')}")
+    return "\n".join(lines)
+
+
 @app.get("/api/baseline")
 def get_baseline(config_id: str):
-    """最近一次全量巡检的基线对比结果：新增 / 已修复 / 持续风险。"""
+    """最近一次全量巡检的基线对比报告（直接返回格式化文本，避免模型误读数组）。"""
     diff = ledger_engine.last_baseline(config_id)
     if diff is None:
         raise HTTPException(status_code=404,
                             detail="尚无基线数据：请先对该 config 执行一次全量巡检")
-    return diff
+    return {
+        "ok": True,
+        "config_id": config_id,
+        "scan_mode": diff.get("scan_mode"),
+        "job_id": diff.get("job_id"),
+        "computed_at": diff.get("computed_at"),
+        "report_text": _format_baseline(diff),
+        "trace": _new_trace(),
+    }
 
 
 @app.get("/api/retest/targets")
@@ -412,18 +469,49 @@ def start_job(req: JobStartRequest | None = None, config_id: str | None = None):
         raise HTTPException(status_code=404, detail="config not found")
     plan = planner.create_planner().build_plan(cfg)
     job = _spawn_job("manual", cid, plan)
-    return {"job_id": job["job_id"], "status": job["status"], "plan": plan}
+    return {"ok": True, "job_id": job["job_id"], "status": job["status"],
+            "plan": plan, "message": "巡检任务已创建", "trace": _new_trace()}
 
 
 @app.get("/api/jobs")
 def list_jobs(job_id: str | None = None):
-    """任务列表；兼容恒脑平台 query 传参：GET /api/jobs?job_id=xxx 时返回单个任务详情。"""
+    """任务查询；兼容恒脑平台 query 传参：GET /api/jobs?job_id=xxx 返回单个任务详情。
+
+    未提供 job_id 时兜底返回最近一次任务（避免模型因猜不出 ID 而放弃调用）。
+    """
+    jobs = job_store.list_all()
     if job_id:
         job = job_store.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
+        job = dict(job)
+        job["report_text"] = _format_job_report(job)
+        job["trace"] = _new_trace()
         return job
-    return {"jobs": job_store.list_all()}
+    if not jobs:
+        return {"ok": False, "message": "尚无巡检任务，请先发起一次巡检",
+                "trace": _new_trace()}
+    latest = max(jobs, key=lambda j: j.get("started_at") or "")
+    latest = dict(latest)
+    latest["report_text"] = _format_job_report(latest)
+    latest["trace"] = _new_trace()
+    return latest
+
+
+@app.get("/api/jobs/latest")
+def latest_job(config_id: str | None = None):
+    """最近一次巡检任务详情；可按 config_id 过滤（供工作流/工具节点兜底取 job_id）。"""
+    jobs = job_store.list_all()
+    if config_id:
+        jobs = [j for j in jobs if j.get("config_id") == config_id]
+    if not jobs:
+        return {"ok": False, "message": "尚无巡检任务，请先发起一次巡检",
+                "trace": _new_trace()}
+    latest = max(jobs, key=lambda j: j.get("started_at") or "")
+    latest = dict(latest)
+    latest["report_text"] = _format_job_report(latest)
+    latest["trace"] = _new_trace()
+    return latest
 
 
 @app.get("/api/jobs/{job_id}")
