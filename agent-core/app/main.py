@@ -266,11 +266,13 @@ def authorize_config(
     # 空 domains = 平台连通性探测：返回 200 但不创建任何配置（无副作用，安全）
     if not data["domains"]:
         return {"ok": True, "config_id": "probe", "saved": True, "probe": True,
-                "domains": [], "trace": _new_trace()}
+                "domains": [], "trace": _new_trace(),
+                "message": "连通性探测（未创建配置）"}
     # 无有效口令：返回 200 探测响应、不创建配置（恒脑调试探测兼容；真实授权必须带口令）
     if token != ADMIN_TOKEN:
         return {"ok": False, "config_id": "probe", "saved": False, "probe": True,
-                "reason": "auth_missing", "domains": data["domains"], "trace": _new_trace()}
+                "reason": "auth_missing", "domains": data["domains"],
+                "trace": _new_trace(), "message": "鉴权失败：缺少有效管理员口令"}
     validate_config(data)
     config_id = storage.make_config_id(data["domains"])
     config_store.save(config_id, data)
@@ -279,7 +281,8 @@ def authorize_config(
            {"domains": data["domains"], "scope": data["scope"], "by": "admin_api"})
     return {"ok": True, "config_id": config_id, "saved": True,
             "authorized_domains": ",".join(data["domains"]),
-            "domains": data["domains"], "trace": _new_trace()}
+            "domains": data["domains"], "trace": _new_trace(),
+            "message": "授权成功，已加入巡检白名单"}
 
 
 @app.post("/api/config")
@@ -419,6 +422,7 @@ def get_baseline(config_id: str):
         "computed_at": diff.get("computed_at"),
         "report_text": _format_baseline(diff),
         "trace": _new_trace(),
+        "message": "基线报告已生成",
     }
 
 
@@ -485,6 +489,8 @@ def list_jobs(job_id: str | None = None):
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
         job = dict(job)
+        job["ok"] = True
+        job["message"] = "查询成功"
         job["report_text"] = _format_job_report(job)
         job["trace"] = _new_trace()
         return job
@@ -493,6 +499,8 @@ def list_jobs(job_id: str | None = None):
                 "trace": _new_trace()}
     latest = max(jobs, key=lambda j: j.get("started_at") or "")
     latest = dict(latest)
+    latest["ok"] = True
+    latest["message"] = "查询成功（最近一次任务）"
     latest["report_text"] = _format_job_report(latest)
     latest["trace"] = _new_trace()
     return latest
@@ -509,6 +517,8 @@ def latest_job(config_id: str | None = None):
                 "trace": _new_trace()}
     latest = max(jobs, key=lambda j: j.get("started_at") or "")
     latest = dict(latest)
+    latest["ok"] = True
+    latest["message"] = "查询成功（最近一次任务）"
     latest["report_text"] = _format_job_report(latest)
     latest["trace"] = _new_trace()
     return latest
@@ -533,3 +543,100 @@ def list_audit(limit: int = 50):
     entries = audit_store.list_all()
     entries.sort(key=lambda e: e.get("created_at", ""), reverse=True)
     return {"audit": entries[:limit]}
+
+
+# ---------- 4.7 恒脑全能工具（单工具确定性方案） ----------
+
+_DEFAULT_CONFIG_ID = "40b5be02797f"   # 测试站演示主资产
+
+
+@app.post("/api/agent")
+def agent_tool(
+    action: str = "",
+    config_id: str = "",
+    job_id: str = "",
+    domains: str = "",
+    x_admin_token: str = Header(default=""),
+):
+    """恒脑单一工具入口：由 action 路由到发起巡检/查询风险/导出报告/新增授权。
+
+    设计动机：恒脑模型节点同时挂 4 个工具时，模型做「4 选 1 + 填对参数」的概率调用极不稳定；
+    合并为 1 个工具后，模型只需判断「调 / 不调」，由服务端确定性路由，调用率大幅提升。
+    """
+    action = (action or "").strip().lower()
+    trace = _new_trace()
+
+    # ---- 发起巡检 ----
+    if action == "start":
+        cid = (config_id or "").strip() or _DEFAULT_CONFIG_ID
+        cfg = config_store.get(cid)
+        if cfg is None:
+            raise HTTPException(status_code=404, detail=f"config not found: {cid}")
+        plan = planner.create_planner().build_plan(cfg)
+        job = _spawn_job("manual", cid, plan)
+        return {"ok": True, "action": action, "config_id": cid,
+                "job_id": job["job_id"], "status": job["status"],
+                "message": "巡检任务已创建，等待完成后即可查询风险", "trace": trace}
+
+    # ---- 查询风险 ----
+    if action == "query":
+        jobs = job_store.list_all()
+        if job_id.strip():
+            job = job_store.get(job_id.strip())
+            if job is None:
+                return {"ok": False, "action": action, "job_id": job_id.strip(),
+                        "message": f"没有找到巡检任务 {job_id.strip()}，请确认 ID 或重新发起巡检",
+                        "trace": trace}
+            job = dict(job)
+        elif not jobs:
+            return {"ok": False, "action": action, "job_id": "",
+                    "message": "尚无巡检任务，请先发起一次巡检", "trace": trace}
+        else:
+            job = dict(max(jobs, key=lambda j: j.get("started_at") or ""))
+            job["message"] = "查询成功（最近一次任务）"
+        job["ok"] = True
+        job["action"] = action
+        job["trace"] = trace
+        job["report_text"] = _format_job_report(job)
+        return job
+
+    # ---- 导出报告 ----
+    if action == "report":
+        cid = (config_id or "").strip() or _DEFAULT_CONFIG_ID
+        diff = ledger_engine.last_baseline(cid)
+        if diff is None:
+            return {"ok": False, "action": action, "config_id": cid,
+                    "message": "尚无基线数据：请先对该配置执行一次全量巡检",
+                    "trace": trace}
+        return {"ok": True, "action": action, "config_id": cid,
+                "scan_mode": diff.get("scan_mode"), "job_id": diff.get("job_id"),
+                "computed_at": diff.get("computed_at"),
+                "report_text": _format_baseline(diff),
+                "message": "基线报告已生成", "trace": trace}
+
+    # ---- 新增授权 ----
+    if action == "auth":
+        dl = [d.strip() for d in domains.split(",") if d.strip()]
+        if not dl:
+            return {"ok": False, "action": action,
+                    "message": "请提供要授权的域名（多个用英文逗号分隔）",
+                    "trace": trace}
+        if x_admin_token.strip() != ADMIN_TOKEN:
+            return {"ok": False, "action": action,
+                    "message": "鉴权失败：缺少有效管理员口令",
+                    "trace": trace}
+        data = {"domains": dl, "scope": "full", "cron": "0 2 * * *",
+                "sensitive_rules": [], "admin_token": x_admin_token}
+        validate_config(data)
+        cid = storage.make_config_id(dl)
+        config_store.save(cid, data)
+        scheduler.schedule_inspection(cid, data["cron"], _scheduled_run)
+        _audit("config_authorized", cid, {"domains": dl, "by": "agent_tool"})
+        return {"ok": True, "action": action, "config_id": cid,
+                "authorized_domains": ",".join(dl),
+                "message": "授权成功，已加入巡检白名单", "trace": trace}
+
+    # ---- 未知 / 空 action（含恒脑连通性探测） ----
+    return {"ok": False, "action": action,
+            "message": "action 必填，可选值：start / query / report / auth",
+            "trace": trace}
