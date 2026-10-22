@@ -26,11 +26,13 @@ CREATE TABLE risks (
   signature TEXT UNIQUE NOT NULL,
   status TEXT DEFAULT 'active',      -- active|confirmed|false_positive|fixed
   ai_explanation JSONB DEFAULT '{}', -- {impact, remediation, evidence_summary}
+  job_id TEXT,                       -- 记录该风险由哪次巡检写入（成员C 扩展）
   first_seen TIMESTAMPTZ DEFAULT now(),
   last_seen TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX idx_risks_asset ON risks(asset_url);
 CREATE INDEX idx_risks_status ON risks(status);
+CREATE INDEX idx_risks_job ON risks(job_id);
 
 CREATE TABLE baselines (
   id BIGSERIAL PRIMARY KEY,
@@ -43,6 +45,7 @@ CREATE TABLE baselines (
 
 CREATE TABLE jobs (
   id BIGSERIAL PRIMARY KEY,
+  job_id TEXT UNIQUE,                -- 巡检任务 ID（成员C 扩展）
   job_type TEXT NOT NULL,            -- scheduled|manual|retest
   target_scope JSONB,
   status TEXT DEFAULT 'pending',     -- pending|running|done|failed
