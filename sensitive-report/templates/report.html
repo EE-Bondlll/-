@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>安全巡检报告 {{job.job_id}}</title>
+<style>
+  body { font-family: "Microsoft YaHei", "SimSun", sans-serif; margin: 32px; color: #222; }
+  h1 { font-size: 24px; border-bottom: 3px solid #c0392b; padding-bottom: 8px; }
+  h2 { font-size: 18px; color: #c0392b; margin-top: 28px; }
+  .meta { color: #666; font-size: 13px; }
+  .summary { display: flex; gap: 16px; margin: 16px 0; }
+  .card { flex: 1; border: 1px solid #ddd; border-radius: 6px; padding: 12px; text-align: center; }
+  .card .num { font-size: 28px; font-weight: bold; }
+  .critical .num { color: #c0392b; } .high .num { color: #e67e22; }
+  .medium .num { color: #f1c40f; } .low .num { color: #3498db; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #f5f5f5; }
+  .sev-critical { color: #fff; background: #c0392b; padding: 1px 6px; border-radius: 3px; }
+  .sev-high { color: #fff; background: #e67e22; padding: 1px 6px; border-radius: 3px; }
+  .sev-medium { color: #fff; background: #f1c40f; padding: 1px 6px; border-radius: 3px; }
+  .sev-low { color: #fff; background: #3498db; padding: 1px 6px; border-radius: 3px; }
+  .evidence { background: #fafafa; padding: 6px; border-left: 3px solid #999; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  .explain { margin-top: 4px; font-size: 12px; color: #555; }
+</style>
+</head>
+<body>
+<h1>网站安全巡检报告</h1>
+<p class="meta">任务ID：{{job.job_id}} ｜ 类型：{{job.job_type}} ｜ 状态：{{job.status}}
+  ｜ 开始：{{job.started_at}} ｜ 结束：{{job.finished_at}}</p>
+
+<h2>一、风险概览</h2>
+<div class="summary">
+  <div class="card critical"><div class="num">{{counts.critical}}</div><div>严重</div></div>
+  <div class="card high"><div class="num">{{counts.high}}</div><div>高危</div></div>
+  <div class="card medium"><div class="num">{{counts.medium}}</div><div>中危</div></div>
+  <div class="card low"><div class="num">{{counts.low}}</div><div>低危</div></div>
+</div>
+<p>共发现风险 <b>{{risks|length}}</b> 条，其中敏感信息泄露（leak）<b>{{leak_count}}</b> 条。所有命中敏感内容均已脱敏展示。</p>
+
+<h2>二、风险明细</h2>
+<table>
+<tr><th>#</th><th>资产 URL</th><th>类别</th><th>级别</th><th>标题</th><th>证据（已脱敏）</th></tr>
+{% for r in risks %}
+<tr>
+  <td>{{loop.index}}</td>
+  <td>{{r.asset_url}}</td>
+  <td>{{r.category}}</td>
+  <td><span class="sev-{{r.severity}}">{{r.severity}}</span></td>
+  <td>{{r.title}}<br><span class="meta">{{r.description}}</span></td>
+  <td><div class="evidence">{{r.evidence.matched_context or r.evidence.response_sample or ''}}</div>
+    {% if r.ai_explanation %}
+    <div class="explain">
+      <b>影响：</b>{{r.ai_explanation.impact or '-'}}<br>
+      <b>修复建议：</b>{{r.ai_explanation.remediation or '-'}}
+    </div>
+    {% endif %}
+  </td>
+</tr>
+{% endfor %}
+</table>
+
+<p class="meta" style="margin-top:32px">本报告由敏感信息与数据报告服务（成员C）自动生成，敏感内容已脱敏，请勿外传。</p>
+</body>
+</html>

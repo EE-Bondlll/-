@@ -122,3 +122,36 @@ class DataClient:
         return httpx.post(DATA_BASE + "/alert/send",
                           json={"level": level, "message": message, "payload": payload or {}},
                           timeout=30).json()
+
+    def scan_sensitive(self, step: dict, assets: list[dict],
+                       config: dict | None = None) -> dict:
+        """敏感信息检测：MOCK=0 调成员C 的 /scan/sensitive；MOCK 时返回内置示例（演示）。
+
+        step 携带 rules（来自配置的敏感信息规则）；C 服务在 rules 为空时自动加载启用规则。
+        """
+        if not MOCK:
+            import httpx
+            resp = httpx.post(
+                DATA_BASE + "/scan/sensitive",
+                json={"assets": assets,
+                      "config": {"rules": step.get("rules", []) or [],
+                                 "rate_limit_qps": (config or {}).get("rate_limit_qps", 5),
+                                 "timeout_sec": (config or {}).get("timeout_sec", 30)}},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        # mock：仅对第一个资产输出一条敏感泄露示例，保持演示闭环
+        if not assets:
+            return {"job_id": "mock-sensitive", "risks": []}
+        a = assets[0]
+        return {"job_id": "mock-sensitive", "risks": [{
+            "asset_url": a["url"], "category": "leak", "severity": "high",
+            "title": "备份文件暴露环境变量（含数据库口令）（mock）",
+            "description": "[mock] 命中文件类型规则 .bak 与正则 DB_PASSWORD",
+            "evidence": {"matched_context": "DB_PASSWORD=****（已脱敏，mock）"},
+            "raw_output": "{}", "tool": "sensitive-engine", "template": "rule:file_type:.bak",
+            "first_seen": "2026-10-14T00:00:00+08:00", "last_seen": "2026-10-14T00:00:00+08:00",
+            "status": "active",
+            "signature": _signature(a["url"], "leak", "备份文件暴露环境变量（含数据库口令）（mock）"),
+        }]}

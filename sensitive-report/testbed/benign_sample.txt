@@ -1,0 +1,6 @@
+# 正常页面（预期不误报）
+# 这是一段示例代码：your_password 是占位符，example.com 是示例域名
+# 文档里写 "请把 your_api_key 替换成你自己的 key"
+def demo():
+    return "123456"  # 测试数据
+# 预期：规则兜底应判为示例/测试，不误报

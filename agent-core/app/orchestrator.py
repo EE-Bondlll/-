@@ -78,9 +78,13 @@ class Orchestrator:
                        if s["stage"] == "detect" and s["service"] != "agent-core"]
         for step in detect_plan:
             self.limiter.acquire()
-            resp = self.detector.scan(step["endpoint"], assets, cfg) \
-                if step["service"] == "detectors" else \
-                self._sensitive_scan(step["endpoint"], assets, cfg)
+            if step["service"] == "detectors":
+                resp = self.detector.scan(step["endpoint"], assets, cfg)
+            elif step["service"] == "sensitive-report":
+                # 敏感信息检测：MOCK=0 调成员C 的 /scan/sensitive，否则内置示例
+                resp = self.data.scan_sensitive(step, assets, cfg)
+            else:
+                continue
             all_risks.extend(resp.get("risks", []))
 
         # 阶段6：去重（signature 唯一）
@@ -115,19 +119,6 @@ class Orchestrator:
             "baseline": baseline,
             "risks": dedup,
         }
-
-    def _sensitive_scan(self, endpoint, assets, cfg):
-        # 敏感信息检测：成员C 的引擎；mock 时由 DetectorClient 统一模拟（此处返回 leak 示例）
-        return {"risks": [{
-            "asset_url": a["url"], "category": "leak", "severity": "high",
-            "title": "备份文件暴露环境变量（含数据库口令）（mock）",
-            "description": "[mock] 命中文件类型规则 .bak 与正则 DB_PASSWORD",
-            "evidence": {"matched_context": "DB_PASSWORD=****（已脱敏，mock）"},
-            "raw_output": "{}", "tool": "sensitive-engine", "template": "file_type:.bak",
-            "first_seen": "2026-10-14T00:00:00+08:00", "last_seen": "2026-10-14T00:00:00+08:00",
-            "status": "active",
-            "signature": clients._signature(a["url"], "leak", "备份文件暴露环境变量（含数据库口令）（mock）"),
-        } for a in assets[:1]]}
 
     @staticmethod
     def _dedup(risks: list[dict]) -> list[dict]:

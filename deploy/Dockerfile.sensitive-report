@@ -1,0 +1,17 @@
+# 成员C · 敏感信息与数据报告服务
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# weasyprint 系统依赖（PDF 导出用；若不需要 PDF 可注释掉）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libfontconfig1 fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY sensitive-report/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+COPY sensitive-report/ .
+
+EXPOSE 8002
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]

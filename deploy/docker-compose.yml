@@ -67,12 +67,28 @@ services:
     depends_on:
       - postgres
 
-  # 成员C：敏感信息与数据报告（待完成）
+  # 成员C：敏感信息与数据报告（已并入 sensitive-report/）
   sensitive-report:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.sensitive-report
     container_name: inspection-sensitive-report
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-inspection}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-inspection_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-inspection}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      FEISHU_WEBHOOK: ${FEISHU_WEBHOOK:-}
+      FEISHU_SECRET: ${FEISHU_SECRET:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      ALERT_MAIL_TO: ${ALERT_MAIL_TO:-}
+      GENERAL_WEBHOOK: ${GENERAL_WEBHOOK:-}
     ports:
       - "8002:8002"
     depends_on:

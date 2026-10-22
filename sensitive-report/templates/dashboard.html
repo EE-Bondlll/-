@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>安全巡检 Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+  body { font-family: "Microsoft YaHei", sans-serif; margin: 0; background: #f0f2f5; }
+  header { background: #c0392b; color: #fff; padding: 16px 24px; font-size: 20px; }
+  .cards { display: flex; gap: 16px; padding: 20px; }
+  .card { flex: 1; background: #fff; border-radius: 8px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .card .num { font-size: 32px; font-weight: bold; color: #c0392b; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 20px 20px; }
+  .chart { background: #fff; border-radius: 8px; padding: 12px; height: 320px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  th, td { border-bottom: 1px solid #eee; padding: 6px; text-align: left; }
+</style>
+</head>
+<body>
+<header>网站安全风险巡检 · Dashboard</header>
+<div class="cards">
+  <div class="card"><div>风险总数</div><div class="num" id="t-total">-</div></div>
+  <div class="card"><div>严重/高危</div><div class="num" id="t-critical">-</div></div>
+  <div class="card"><div>敏感泄露</div><div class="num" id="t-leak">-</div></div>
+  <div class="card"><div>已修复</div><div class="num" id="t-fixed">-</div></div>
+</div>
+<div class="grid">
+  <div class="chart" id="c-severity"></div>
+  <div class="chart" id="c-category"></div>
+  <div class="chart" id="c-lifecycle"></div>
+  <div class="chart" id="c-top"></div>
+  <div class="chart" id="c-trend"></div>
+</div>
+<div class="card" style="margin:0 20px 20px">
+  <h3>巡检任务状态</h3>
+  <table><thead><tr><th>任务ID</th><th>类型</th><th>状态</th><th>触发者</th><th>开始时间</th><th>结束时间</th></tr></thead>
+  <tbody id="job-tbody"></tbody></table>
+</div>
+<div class="card" style="margin:0 20px 20px">
+  <h3>最新风险</h3>
+  <table><thead><tr><th>URL</th><th>类别</th><th>级别</th><th>标题</th><th>状态</th></tr></thead>
+  <tbody id="risk-tbody"></tbody></table>
+</div>
+<script>
+async function jget(url){ const r = await fetch(url); return r.json(); }
+function pie(id, data){
+  echarts.init(document.getElementById(id)).setOption({
+    tooltip:{trigger:'item'}, series:[{type:'pie', radius:'60%', data:data}]
+  });
+}
+async function main(){
+  const [risks, diff, trend, jobs] = await Promise.all([
+    jget('/data/risks?page_size=200'),
+    jget('/data/baseline-diff'),
+    jget('/data/stats/trend?days=14'),
+    jget('/data/jobs?limit=20')
+  ]);
+  const list = risks.risks || [];
+  document.getElementById('t-total').textContent = risks.total;
+  document.getElementById('t-critical').textContent = list.filter(r=>r.severity==='critical'||r.severity==='high').length;
+  document.getElementById('t-leak').textContent = list.filter(r=>r.category==='leak').length;
+  document.getElementById('t-fixed').textContent = (diff.fixed||[]).length;
+
+  const sev = {}; list.forEach(r=>sev[r.severity]=(sev[r.severity]||0)+1);
+  pie('c-severity', Object.entries(sev).map(([k,v])=>({name:k,value:v})));
+  const cat = {}; list.forEach(r=>cat[r.category]=(cat[r.category]||0)+1);
+  pie('c-category', Object.entries(cat).map(([k,v])=>({name:k,value:v})));
+
+  echarts.init(document.getElementById('c-lifecycle')).setOption({
+    tooltip:{}, xAxis:{type:'category',data:['新增','持续','已修复']},
+    yAxis:{type:'value'},
+    series:[{type:'bar', data:[
+      {value:(diff.new||[]).length, itemStyle:{color:'#c0392b'}},
+      {value:(diff.persistent||[]).length, itemStyle:{color:'#e67e22'}},
+      {value:(diff.fixed||[]).length, itemStyle:{color:'#27ae60'}}
+    ]}]
+  });
+
+  const host = {}; list.forEach(r=>{ const h=(r.asset_url||'').split('/')[2]||r.asset_url; host[h]=(host[h]||0)+1; });
+  const top = Object.entries(host).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  echarts.init(document.getElementById('c-top')).setOption({
+    tooltip:{}, xAxis:{type:'value'}, yAxis:{type:'category',data:top.map(t=>t[0]).reverse()},
+    series:[{type:'bar', data:top.map(t=>t[1]).reverse()}]
+  });
+
+  echarts.init(document.getElementById('c-trend')).setOption({
+    title:{text:'近14天新增风险趋势', left:'center', textStyle:{fontSize:14}},
+    tooltip:{trigger:'axis'}, xAxis:{type:'category', data:trend.dates||[]},
+    yAxis:{type:'value'},
+    series:[{type:'line', data:trend.counts||[], smooth:true, itemStyle:{color:'#c0392b'}, areaStyle:{}}]
+  });
+
+  document.getElementById('job-tbody').innerHTML = (jobs.jobs||[]).map(j=>
+    `<tr><td>${j.job_id}</td><td>${j.job_type}</td><td>${j.status}</td><td>${j.triggered_by||'-'}</td><td>${(j.started_at||'').replace('T',' ').slice(0,19)}</td><td>${(j.finished_at||'-').replace('T',' ').slice(0,19)}</td></tr>`
+  ).join('') || '<tr><td colspan="6" style="color:#999">暂无任务记录</td></tr>';
+
+  document.getElementById('risk-tbody').innerHTML = list.slice(0,10).map(r=>
+    `<tr><td>${r.asset_url}</td><td>${r.category}</td><td>${r.severity}</td><td>${r.title}</td><td>${r.status}</td></tr>`
+  ).join('');
+}
+main();
+</script>
+</body>
+</html>
