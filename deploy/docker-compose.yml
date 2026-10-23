@@ -43,6 +43,7 @@ services:
       DETECTOR_BASE_URL: http://detectors:8001
       DATA_BASE_URL: http://sensitive-report:8002
       ADMIN_TOKEN: ${ADMIN_TOKEN:-SecInspector@2026Admin}
+      AUTH_PASS: ${AUTH_PASS:-SecInspector@2026Auth}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_MODEL: ${LLM_MODEL:-}

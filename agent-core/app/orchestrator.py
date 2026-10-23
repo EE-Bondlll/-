@@ -3,6 +3,7 @@
 对应任务书 4.3/4.4：白名单校验、QPS 限速、统一结果聚合、signature 去重、风险定级。
 """
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from . import clients
@@ -56,7 +57,7 @@ class Orchestrator:
         仅对指定资产执行检测；否则为全量模式：先做资产发现。
         """
         domains = plan.get("domains", [])
-        cfg = {"rate_limit_qps": 5, "non_destructive": True, "timeout_sec": 30}
+        cfg = {"rate_limit_qps": 20, "non_destructive": True, "timeout_sec": 30}
         all_risks: list[dict] = []
         assets: list[dict] = []
 
@@ -66,26 +67,34 @@ class Orchestrator:
             assets = targets
             scan_mode = "retest"
         else:
-            # 阶段1：资产发现（discovery）
-            disc = self.detector.scan("/scan/discovery",
-                                      [{"url": d} for d in domains], cfg)
+            # 阶段1：资产发现（discovery）——契约：Asset 需 url（含 scheme）+ host
+            entries = []
+            for d in domains:
+                u = d if d.startswith(("http://", "https://")) else "http://" + d
+                entries.append({"url": u, "host": u.split("//")[-1].split("/")[0]})
+            disc = self.detector.scan("/scan/discovery", entries, cfg)
             assets = check_whitelist(disc.get("assets", []), domains)
             scan_mode = "full"
         self.data.write_assets(assets)
 
-        # 阶段2-5：并行检测（vuln / tamper / malware / sensitive）
+        # 阶段2-5：并行检测（vuln / tamper / malware / sensitive 并发，互不依赖）
         detect_plan = [s for s in plan["steps"]
                        if s["stage"] == "detect" and s["service"] != "agent-core"]
-        for step in detect_plan:
+
+        def _run_detect(step: dict) -> dict:
             self.limiter.acquire()
             if step["service"] == "detectors":
-                resp = self.detector.scan(step["endpoint"], assets, cfg)
-            elif step["service"] == "sensitive-report":
+                return self.detector.scan(step["endpoint"], assets, cfg)
+            if step["service"] == "sensitive-report":
                 # 敏感信息检测：MOCK=0 调成员C 的 /scan/sensitive，否则内置示例
-                resp = self.data.scan_sensitive(step, assets, cfg)
-            else:
-                continue
-            all_risks.extend(resp.get("risks", []))
+                return self.data.scan_sensitive(step, assets, cfg)
+            return {}
+
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="detect") as ex:
+            futures = {ex.submit(_run_detect, s): s for s in detect_plan}
+            for fut in as_completed(futures):
+                resp = fut.result()  # 任一检测失败不阻断其他，异常由外层任务捕获
+                all_risks.extend(resp.get("risks", []))
 
         # 阶段6：去重（signature 唯一）
         dedup = self._dedup(all_risks)

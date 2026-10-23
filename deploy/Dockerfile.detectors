@@ -1,0 +1,44 @@
+# 成员B：检测执行层（secbot-detector）容器化 —— 国内镜像源加速版
+# context 为项目根（..），代码位于 detectors/
+FROM python:3.12-slim
+
+# 阿里云 debian 源（trixie，deb822 格式）
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null; \
+    apt-get update && apt-get install -y --no-install-recommends \
+    git curl wget unzip ruby-full build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Go（阿里云镜像）→ subfinder / katana / gobuster（goproxy.cn 加速模块下载）
+RUN wget -q https://mirrors.aliyun.com/golang/go1.23.4.linux-amd64.tar.gz -O /tmp/go.tgz \
+    || wget -q https://go.dev/dl/go1.23.4.linux-amd64.tar.gz -O /tmp/go.tgz \
+    && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
+ENV GOPROXY=https://goproxy.cn,direct
+RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
+    && go install github.com/projectdiscovery/katana/cmd/katana@latest \
+    && go install github.com/OJ/gobuster/v3@latest
+
+# nuclei + 模板（ghproxy 加速下载，失败回退直连）
+RUN wget -q https://mirror.ghproxy.com/https://github.com/projectdiscovery/nuclei/releases/download/v3.3.7/nuclei_3.3.7_linux_amd64.zip -O /tmp/n.zip \
+    || wget -q https://github.com/projectdiscovery/nuclei/releases/download/v3.3.7/nuclei_3.3.7_linux_amd64.zip -O /tmp/n.zip \
+    && unzip -o /tmp/n.zip -d /usr/local/bin/ \
+    && rm /tmp/n.zip && chmod +x /usr/local/bin/nuclei \
+    && nuclei -update-templates
+
+# whatweb + wpscan（ruby 国内源）
+RUN apt-get update && apt-get install -y --no-install-recommends whatweb && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN gem install wpscan --no-document -s https://gems.ruby-china.com
+
+# testssl.sh（ghproxy 加速，失败回退直连）
+RUN git clone --depth 1 https://mirror.ghproxy.com/https://github.com/drwetter/testssl.sh /opt/testssl \
+    || git clone --depth 1 https://github.com/drwetter/testssl.sh /opt/testssl \
+    && ln -sf /opt/testssl/testssl.sh /usr/local/bin/testssl.sh
+
+WORKDIR /app
+COPY detectors/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+COPY detectors/app ./app
+COPY detectors/scripts ./scripts
+EXPOSE 8001
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]

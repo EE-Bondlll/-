@@ -48,14 +48,17 @@ ledger_engine = ledger_mod.Ledger()
 # ---------- 校验 ----------
 
 _DOMAIN_RE = re.compile(r"^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+_DOMAIN_PORT_RE = re.compile(r"^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+:\d{1,5}$")
 _IPV4_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
+_IPV4_PORT_RE = re.compile(r"^(\d{1,3}\.){3}\d{1,3}:\d{1,5}$")
 _VALID_SCOPES = {"full", "subdomains", "paths"}
 
 
 def validate_config(cfg: dict):
     if not cfg.get("domains"):
         raise HTTPException(status_code=422, detail="domains 不能为空")
-    bad = [d for d in cfg["domains"] if not (_DOMAIN_RE.match(d) or _IPV4_RE.match(d))]
+    bad = [d for d in cfg["domains"] if not (_DOMAIN_RE.match(d) or _IPV4_RE.match(d)
+                                             or _DOMAIN_PORT_RE.match(d) or _IPV4_PORT_RE.match(d))]
     if bad:
         raise HTTPException(status_code=422, detail=f"域名/IP 格式非法: {bad}")
     if cfg.get("scope") not in _VALID_SCOPES:
@@ -223,6 +226,11 @@ def health():
 
 # 管理员口令：部署时通过环境变量 ADMIN_TOKEN 注入；未设置时为演示默认值
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "SecInspector@2026")
+
+# 授权口令：新增域名授权时用户必须提供的二次口令（sudo 模式）。
+# 设计动机：能对话 ≠ 能授权——即使智能体对外可用，不知道口令的人也无法新增授权。
+# 该口令是模型编不出来的凭证，同时强化了恒脑防编造（授权成功与否只有工具返回才知道）。
+AUTH_PASS = os.environ.get("AUTH_PASS", "SecInspector@2026Auth")
 
 
 class AuthorizeRequest(BaseModel):
@@ -556,12 +564,14 @@ def agent_tool(
     config_id: str = "",
     job_id: str = "",
     domains: str = "",
+    auth_key: str = "",
     x_admin_token: str = Header(default=""),
 ):
     """恒脑单一工具入口：由 action 路由到发起巡检/查询风险/导出报告/新增授权。
 
     设计动机：恒脑模型节点同时挂 4 个工具时，模型做「4 选 1 + 填对参数」的概率调用极不稳定；
     合并为 1 个工具后，模型只需判断「调 / 不调」，由服务端确定性路由，调用率大幅提升。
+    auth_key：仅 auth 动作需要——用户必须提供授权口令（sudo 模式），口令错误拒绝授权。
     """
     action = (action or "").strip().lower()
     trace = _new_trace()
@@ -614,12 +624,24 @@ def agent_tool(
                 "report_text": _format_baseline(diff),
                 "message": "基线报告已生成", "trace": trace}
 
-    # ---- 新增授权 ----
+    # ---- 新增授权（sudo 模式：必须提供授权口令） ----
     if action == "auth":
-        dl = [d.strip() for d in domains.split(",") if d.strip()]
+        # 容忍用户/模型直接传 URL：自动剥协议前缀与尾部斜杠，只留 host（如 http://example-site.com → example-site.com）
+        dl = []
+        for d in domains.split(","):
+            d = d.strip()
+            if not d:
+                continue
+            d = re.sub(r"^https?://", "", d, flags=re.IGNORECASE).rstrip("/")
+            if d:
+                dl.append(d)
         if not dl:
             return {"ok": False, "action": action,
                     "message": "请提供要授权的域名（多个用英文逗号分隔）",
+                    "trace": trace}
+        if (auth_key or "").strip() != AUTH_PASS:
+            return {"ok": False, "action": action,
+                    "message": "授权口令错误，授权失败。请向管理员获取授权口令后重试。",
                     "trace": trace}
         if x_admin_token.strip() != ADMIN_TOKEN:
             return {"ok": False, "action": action,

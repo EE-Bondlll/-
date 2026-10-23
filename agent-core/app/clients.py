@@ -47,7 +47,7 @@ class DetectorClient:
         resp = httpx.post(
             DETECTOR_BASE + endpoint,
             json={"assets": assets, "config": config or {}},
-            timeout=30,
+            timeout=900,   # nuclei 全量模板扫描可达数分钟；30s 过短会拖垮任务
         )
         resp.raise_for_status()
         return resp.json()
@@ -137,7 +137,7 @@ class DataClient:
                       "config": {"rules": step.get("rules", []) or [],
                                  "rate_limit_qps": (config or {}).get("rate_limit_qps", 5),
                                  "timeout_sec": (config or {}).get("timeout_sec", 30)}},
-                timeout=30,
+                timeout=600,
             )
             resp.raise_for_status()
             return resp.json()
